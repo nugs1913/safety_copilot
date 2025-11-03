@@ -350,7 +350,7 @@ class BackgroundMonitoringService {
     _cameraController?.dispose();
     _gpsService.dispose();
     _faceDetectionService.dispose();
-    _notificationService.dispose();
+    // NotificationService는 싱글톤이므로 dispose하지 않음 (재사용 가능하도록)
     print("All services disposed.");
   }
 
