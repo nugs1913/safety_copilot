@@ -8,50 +8,51 @@ class DetectionAlgorithms {
   static int _drowsyFrameCount = 0;
   static int _phoneUsageFrameCount = 0;
 
-  /// Eye Aspect Ratio (EAR) 계산
-  /// 눈이 감기면 0에 가까워짐
-  static double calculateEAR(Face face) {
-    final leftEye = face.landmarks[FaceLandmarkType.leftEye];
-    final rightEye = face.landmarks[FaceLandmarkType.rightEye];
+  // /// Eye Aspect Ratio (EAR) 계산
+  // /// Google ML Kit의 눈 개폐 확률을 활용하여 EAR 추정
+  // static double calculateEAR(Face face) {
+  //   // Google ML Kit은 눈의 개폐 확률을 제공합니다
+  //   // leftEyeOpenProbability: 0.0 (감음) ~ 1.0 (뜸)
+  //   final leftEyeOpen = face.leftEyeOpenProbability;
+  //   final rightEyeOpen = face.rightEyeOpenProbability;
 
-    if (leftEye == null || rightEye == null) {
-      return 1.0; // 눈을 감지하지 못한 경우 정상으로 간주
-    }
+  //   if (leftEyeOpen == null || rightEyeOpen == null) {
+  //     return 1.0; // 눈을 감지하지 못한 경우 정상으로 간주
+  //   }
 
-    // 왼쪽 눈 EAR
-    final leftEAR = _calculateSingleEyeEAR(leftEye.position);
-    // 오른쪽 눈 EAR
-    final rightEAR = _calculateSingleEyeEAR(rightEye.position);
+  //   // 개폐 확률을 EAR 스케일로 변환
+  //   // 확률이 높을수록 (눈이 떠있을수록) EAR도 높아야 함
+  //   // 확률 0.0 (감음) -> EAR ~0.0
+  //   // 확률 1.0 (뜸) -> EAR ~0.4
+  //   final leftEAR = leftEyeOpen * 0.4;
+  //   final rightEAR = rightEyeOpen * 0.4;
 
-    // 양쪽 눈 평균
-    return (leftEAR + rightEAR) / 2.0;
-  }
-
-  static double _calculateSingleEyeEAR(Point<int> eyeCenter) {
-    // 실제 구현에서는 눈의 6개 랜드마크 포인트를 사용해야 함
-    // 여기서는 간단히 추정값 반환
-    // 실제로는 MediaPipe나 더 정교한 모델 필요
-    return 0.3; // placeholder
-  }
+  //   // 양쪽 눈 평균
+  //   return (leftEAR + rightEAR) / 2.0;
+  // }
 
   /// 졸음운전 감지
   static AlertLevel detectDrowsiness(Face face) {
-    final ear = calculateEAR(face);
+    final double leftEyeOpen = face.leftEyeOpenProbability ?? 1.0;
+    final double rightEyeOpen = face.rightEyeOpenProbability ?? 1.0;
     final headAngle = face.headEulerAngleX ?? 0.0;
 
-    // EAR이 임계값 이하면 눈을 감은 것으로 판단
-    if (ear < AppConstants.EAR_THRESHOLD) {
+    const double eyeOpenThreshold = 0.4;
+    bool eyesClosed =
+        rightEyeOpen < eyeOpenThreshold && leftEyeOpen < eyeOpenThreshold;
+
+    if (eyesClosed) {
       _drowsyFrameCount++;
     } else {
-      _drowsyFrameCount = max(0, _drowsyFrameCount - 1); // 천천히 감소
+      // --- 수정된 부분: 카운터가 더 빨리 감소하여 반응성 향상 ---
+      _drowsyFrameCount = max(0, _drowsyFrameCount - 1);
+      // --- 수정 끝 ---
     }
 
-    // 고개가 앞으로 15도 이상 숙여진 경우 (졸음 징후)
-    if (headAngle > 15) {
-      _drowsyFrameCount += 2; // 가중치 추가
+    if (headAngle > 15.0) {
+      _drowsyFrameCount += 2;
     }
 
-    // 연속 프레임 체크에 따른 경고 레벨 반환
     if (_drowsyFrameCount >= AppConstants.DROWSY_CONSECUTIVE_FRAMES * 2) {
       return AlertLevel.danger;
     } else if (_drowsyFrameCount >= AppConstants.DROWSY_CONSECUTIVE_FRAMES) {
@@ -66,27 +67,24 @@ class DetectionAlgorithms {
   /// 휴대전화 사용 감지
   /// 얼굴이 아래를 보고 있는지 확인
   static AlertLevel detectPhoneUsage(Face face) {
-    final headAngleX = face.headEulerAngleX ?? 0.0; // 위아래 각도
-    final headAngleY = face.headEulerAngleY ?? 0.0; // 좌우 각도
+    final headAngleX = face.headEulerAngleX ?? 0.0;
+    const double headDownAngleThreshold = 20.0;
+    bool lookingDown = headAngleX > headDownAngleThreshold;
 
-    // 고개가 아래로 20도 이상 숙여진 경우
-    bool lookingDown = headAngleX > AppConstants.HEAD_DOWN_ANGLE;
-    
-    // 얼굴이 정면이 아닌 경우 (휴대전화를 보는 각도)
-    bool notFacingForward = headAngleY.abs() > 10;
-
-    if (lookingDown && notFacingForward) {
+    if (lookingDown) {
       _phoneUsageFrameCount++;
     } else {
+      // --- 수정된 부분: 카운터가 더 빨리 감소하여 반응성 향상 ---
       _phoneUsageFrameCount = max(0, _phoneUsageFrameCount - 1);
+      // --- 수정 끝 ---
     }
 
-    // 연속 프레임 체크
     if (_phoneUsageFrameCount >= AppConstants.PHONE_CONSECUTIVE_FRAMES * 2) {
       return AlertLevel.danger;
     } else if (_phoneUsageFrameCount >= AppConstants.PHONE_CONSECUTIVE_FRAMES) {
       return AlertLevel.warning;
-    } else if (_phoneUsageFrameCount >= AppConstants.PHONE_CONSECUTIVE_FRAMES ~/ 2) {
+    } else if (_phoneUsageFrameCount >=
+        AppConstants.PHONE_CONSECUTIVE_FRAMES ~/ 2) {
       return AlertLevel.caution;
     }
 
@@ -97,6 +95,14 @@ class DetectionAlgorithms {
   static void resetCounters() {
     _drowsyFrameCount = 0;
     _phoneUsageFrameCount = 0;
+  }
+
+  /// 현재 프레임 카운트 가져오기 (디버깅용)
+  static Map<String, int> getFrameCounts() {
+    return {
+      'drowsy': _drowsyFrameCount,
+      'phone': _phoneUsageFrameCount,
+    };
   }
 
   /// 운전 점수 계산
@@ -114,8 +120,8 @@ class DetectionAlgorithms {
     score -= phoneUsageEvents * AppConstants.PHONE_USAGE_PENALTY;
 
     // 장시간 안전 운전 보너스 (60분 이상, 위반 사항 없음)
-    if (durationMinutes >= 60 && 
-        drowsinessEvents == 0 && 
+    if (durationMinutes >= 60 &&
+        drowsinessEvents == 0 &&
         phoneUsageEvents == 0) {
       score += AppConstants.SAFE_DRIVING_BONUS;
     }

@@ -12,7 +12,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final BackgroundMonitoringService _monitoringService =
       BackgroundMonitoringService.instance;
   final DatabaseService _databaseService = DatabaseService.instance;
@@ -23,15 +23,42 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadStatistics();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 앱이 다시 활성화될 때 (백그라운드에서 돌아올 때) statistics 갱신
+    if (state == AppLifecycleState.resumed) {
+      _loadStatistics();
+    }
   }
 
   Future<void> _loadStatistics() async {
     final stats = await _databaseService.getStatistics();
-    setState(() {
-      _statistics = stats;
-      _isLoading = false;
-    });
+    if (mounted) {
+      setState(() {
+        _statistics = stats;
+        _isLoading = false;
+      });
+    }
+  }
+
+  // 다른 화면에서 돌아올 때 statistics 갱신
+  void _navigateAndRefresh(Widget screen) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => screen),
+    );
+    // 돌아왔을 때 statistics 갱신
+    _loadStatistics();
   }
 
   @override
@@ -45,26 +72,30 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // 모니터링 시작/중지 버튼
-                  _buildMonitoringButton(),
-                  const SizedBox(height: 30),
+          : RefreshIndicator(
+              onRefresh: _loadStatistics,
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // 모니터링 시작/중지 버튼
+                    _buildMonitoringButton(),
+                    const SizedBox(height: 30),
 
-                  // 통계 카드
-                  _buildStatisticsCard(),
-                  const SizedBox(height: 20),
+                    // 통계 카드
+                    _buildStatisticsCard(),
+                    const SizedBox(height: 20),
 
-                  // 빠른 액션 버튼들
-                  _buildQuickActions(),
-                  const SizedBox(height: 30),
+                    // 빠른 액션 버튼들
+                    _buildQuickActions(),
+                    const SizedBox(height: 30),
 
-                  // 안내 메시지
-                  _buildInfoCard(),
-                ],
+                    // 안내 메시지
+                    _buildInfoCard(),
+                  ],
+                ),
               ),
             ),
     );
@@ -78,18 +109,14 @@ class _HomeScreenState extends State<HomeScreen> {
         if (isMonitoring) {
           await _monitoringService.stopMonitoring();
           setState(() {});
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('모니터링이 종료되었습니다')),
-          );
-        } else {
+          _loadStatistics(); // 모니터링 종료 시 statistics 갱신
           if (mounted) {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => const MonitoringScreen(),
-              ),
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('모니터링이 종료되었습니다')),
             );
           }
+        } else {
+          _navigateAndRefresh(const MonitoringScreen());
         }
       },
       style: ElevatedButton.styleFrom(
@@ -148,11 +175,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   '평균 점수',
                   '${_statistics!['averageScore'].toStringAsFixed(1)}점',
                 ),
-                _buildStatItem(
-                  Icons.warning_amber,
-                  '총 경고',
-                  '${_statistics!['totalEvents']}회',
-                ),
+                // _buildStatItem(
+                //   Icons.warning_amber,
+                //   '총 경고',
+                //   '${_statistics!['totalEvents']}회',
+                // ),
               ],
             ),
           ],
@@ -193,14 +220,7 @@ class _HomeScreenState extends State<HomeScreen> {
             '운전 점수',
             Icons.assessment,
             Colors.purple,
-            () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const ScoreScreen(),
-                ),
-              );
-            },
+            () => _navigateAndRefresh(const ScoreScreen()),
           ),
         ),
         const SizedBox(width: 15),
@@ -209,14 +229,7 @@ class _HomeScreenState extends State<HomeScreen> {
             '주행 기록',
             Icons.history,
             Colors.orange,
-            () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const HistoryScreen(),
-                ),
-              );
-            },
+            () => _navigateAndRefresh(const HistoryScreen()),
           ),
         ),
       ],

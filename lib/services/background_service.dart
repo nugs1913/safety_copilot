@@ -1,26 +1,29 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:battery_plus/battery_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'face_detection_service.dart';
 import 'notification_service.dart';
 import 'database_service.dart';
+import 'gps_driving_service.dart';
 import '../models/detection_event.dart';
 import '../models/driving_session.dart';
+import '../models/driving_behavior_event.dart';
 import '../utils/constants.dart';
-import '../utils/detection_algorithms.dart';
 
 class BackgroundMonitoringService {
-  static final BackgroundMonitoringService instance = 
+  static final BackgroundMonitoringService instance =
       BackgroundMonitoringService._init();
 
   final FaceDetectionService _faceDetectionService = FaceDetectionService();
   final NotificationService _notificationService = NotificationService.instance;
   final DatabaseService _databaseService = DatabaseService.instance;
+  final GpsDrivingService _gpsService = GpsDrivingService.instance;
   final Battery _battery = Battery();
 
   CameraController? _cameraController;
-  Timer? _monitoringTimer;
-  
+  Timer? _batteryCheckTimer;
+
   int _currentPollingRate = 1;
   int? _currentSessionId;
   int _drowsinessEventCount = 0;
@@ -28,19 +31,35 @@ class BackgroundMonitoringService {
   DateTime? _sessionStartTime;
 
   bool _isMonitoring = false;
+  bool _isProcessingImage = false; // 이미지 처리 중 플래그
+
+  // 이벤트 카운트 쿨다운 플래그
+  bool _isDrowsyAlertActive = false;
+  bool _isPhoneAlertActive = false;
 
   BackgroundMonitoringService._init();
 
+  CameraController? get cameraController => _cameraController;
+  bool get isMonitoring => _isMonitoring;
+
   Future<void> initialize() async {
-    await _notificationService.initialize();
-    await _initializeCamera();
+    try {
+      await _notificationService.initialize();
+      await _initializeCamera();
+    } catch (e) {
+      debugPrint('Initialization error: $e');
+      rethrow;
+    }
   }
 
   Future<void> _initializeCamera() async {
     try {
       final cameras = await availableCameras();
-      
-      // 전면 카메라 찾기
+
+      if (cameras.isEmpty) {
+        throw Exception('No cameras available');
+      }
+
       final frontCamera = cameras.firstWhere(
         (camera) => camera.lensDirection == CameraLensDirection.front,
         orElse: () => cameras.first,
@@ -48,219 +67,371 @@ class BackgroundMonitoringService {
 
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.medium, // 배터리 절약을 위해 중간 해상도
+        ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.nv21,
       );
 
       await _cameraController!.initialize();
+      debugPrint('Camera initialized successfully');
     } catch (e) {
-      print('Camera initialization error: $e');
+      debugPrint('Camera initialization error: $e');
+      _cameraController = null;
+      rethrow;
     }
   }
 
   Future<void> startMonitoring() async {
-    if (_isMonitoring) return;
-
-    _isMonitoring = true;
-    _sessionStartTime = DateTime.now();
-
-    // 새 운전 세션 생성
-    final session = DrivingSession(
-      startTime: _sessionStartTime!,
-    );
-    _currentSessionId = await _databaseService.createSession(session);
-
-    // 배터리 레벨에 따른 폴링 레이트 조정
-    await _adjustPollingRate();
-
-    // 모니터링 시작
-    _startPeriodicMonitoring();
-
-    print('Monitoring started - Session ID: $_currentSessionId');
-  }
-
-  void _startPeriodicMonitoring() {
-    _monitoringTimer?.cancel();
-    
-    _monitoringTimer = Timer.periodic(
-      Duration(seconds: _currentPollingRate),
-      (timer) async {
-        if (!_isMonitoring) {
-          timer.cancel();
-          return;
-        }
-
-        await _processFrame();
-        
-        // 주기적으로 배터리 레벨 체크 (1분마다)
-        if (timer.tick % 60 == 0) {
-          await _adjustPollingRate();
-        }
-      },
-    );
-  }
-
-  Future<void> _processFrame() async {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+    if (_isMonitoring) {
+      debugPrint('Already monitoring');
       return;
     }
 
     try {
-      // 카메라에서 이미지 스트림 가져오기
-      _cameraController!.startImageStream((CameraImage image) async {
-        final result = await _faceDetectionService.processImage(image);
+      // 카메라 확인
+      if (_cameraController == null || !_cameraController!.value.isInitialized) {
+        debugPrint("Camera not ready, initializing...");
+        await _initializeCamera();
         
-        if (result['faceDetected'] == true) {
-          await _handleDetectionResult(result);
+        if (_cameraController == null || !_cameraController!.value.isInitialized) {
+          throw Exception("Camera failed to initialize");
         }
-      });
+      }
+
+      _isMonitoring = true;
+      _sessionStartTime = DateTime.now();
+      _drowsinessEventCount = 0;
+      _phoneUsageEventCount = 0;
+
+      // 세션 생성
+      final session = DrivingSession(
+        startTime: _sessionStartTime!,
+      );
+      _currentSessionId = await _databaseService.createSession(session);
+      debugPrint('Session created: $_currentSessionId');
+
+      // 배터리 기반 폴링 레이트 조정
+      await _adjustPollingRate();
+
+      // GPS 모니터링 시작 (선택적)
+      try {
+        final gpsStarted = await _gpsService.startMonitoring();
+        if (gpsStarted) {
+          debugPrint('GPS monitoring started');
+          _gpsService.onBehaviorDetected = _onBehaviorDetected;
+        } else {
+          debugPrint('GPS monitoring not available (permission denied or disabled)');
+        }
+      } catch (e) {
+        debugPrint('GPS service error: $e');
+        // GPS 실패해도 계속 진행
+      }
+
+      // 이미지 처리 스트림 시작
+      _startImageProcessingStream();
+
+      // 배터리 체크 타이머
+      _batteryCheckTimer?.cancel();
+      _batteryCheckTimer = Timer.periodic(
+        const Duration(minutes: 1),
+        (timer) async {
+          if (!_isMonitoring) {
+            timer.cancel();
+            return;
+          }
+          await _adjustPollingRate();
+        },
+      );
+
+      debugPrint('Monitoring started successfully');
     } catch (e) {
-      print('Frame processing error: $e');
+      debugPrint('Error starting monitoring: $e');
+      _isMonitoring = false;
+      rethrow;
     }
   }
 
-  Future<void> _handleDetectionResult(Map<String, dynamic> result) async {
-    final drowsinessLevel = result['drowsinessLevel'] as AlertLevel;
-    final phoneUsageLevel = result['phoneUsageLevel'] as AlertLevel;
+  void _startImageProcessingStream() {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      debugPrint('Camera not initialized for stream');
+      return;
+    }
 
-    // 졸음운전 감지
-    if (drowsinessLevel != AlertLevel.normal) {
-      _drowsinessEventCount++;
+    try {
+      int frameCount = 0;
       
+      // startImageStream은 void를 반환하므로 직접 할당하지 않음
+      _cameraController!.startImageStream((CameraImage image) {
+        frameCount++;
+        
+        // 폴링 레이트에 따라 프레임 스킵
+        if (frameCount % (30 * _currentPollingRate) != 0) {
+          return;
+        }
+
+        // 이미 처리 중이면 스킵
+        if (_isProcessingImage) {
+          return;
+        }
+
+        _isProcessingImage = true;
+        _processImage(image).whenComplete(() {
+          _isProcessingImage = false;
+        });
+      });
+
+      debugPrint('Image stream started');
+    } catch (e) {
+      debugPrint('Error starting image stream: $e');
+    }
+  }
+
+  Future<void> _processImage(CameraImage image) async {
+    try {
+      final result = await _faceDetectionService.processImage(image);
+
+      if (result['faceDetected'] != true) return;
+
+      final drowsinessLevel = result['drowsinessLevel'] as AlertLevel;
+      final phoneUsageLevel = result['phoneUsageLevel'] as AlertLevel;
+
+      // 디버깅을 위한 로그
+      if (drowsinessLevel != AlertLevel.normal || phoneUsageLevel != AlertLevel.normal) {
+        debugPrint('Detection: drowsiness=$drowsinessLevel, phone=$phoneUsageLevel');
+      }
+
+      // 졸음 감지
+      if (drowsinessLevel != AlertLevel.normal) {
+        await _handleDrowsinessDetection(drowsinessLevel);
+      }
+
+      // 휴대전화 사용 감지
+      if (phoneUsageLevel != AlertLevel.normal) {
+        await _handlePhoneUsageDetection(phoneUsageLevel);
+      }
+    } catch (e) {
+      debugPrint('Image processing error: $e');
+    }
+  }
+
+  Future<void> _handleDrowsinessDetection(AlertLevel level) async {
+    if (_isDrowsyAlertActive) return;
+
+    _isDrowsyAlertActive = true;
+    _drowsinessEventCount++;
+
+    debugPrint('⚠️ Drowsiness detected! Level: $level, Count: $_drowsinessEventCount');
+
+    try {
+      // 알림 표시
       await _notificationService.showAlert(
         DetectionType.drowsiness,
-        drowsinessLevel,
-        _getDrowsinessMessage(drowsinessLevel),
+        level,
+        '졸음이 감지되었습니다. 안전한 곳에서 휴식을 취하세요.',
       );
 
-      // 이벤트 기록
-      await _recordEvent(DetectionType.drowsiness, drowsinessLevel);
-    }
+      // 데이터베이스에 저장
+      if (_currentSessionId != null) {
+        final event = DetectionEvent(
+          sessionId: _currentSessionId!,
+          type: DetectionType.drowsiness,
+          level: level,
+          timestamp: DateTime.now(),
+          notes: '졸음 감지',
+        );
+        await _databaseService.createEvent(event);
+        debugPrint('Drowsiness event saved to database');
+      }
 
-    // 휴대전화 사용 감지
-    if (phoneUsageLevel != AlertLevel.normal) {
-      _phoneUsageEventCount++;
-      
+      // 쿨다운 (30초)
+      await Future.delayed(const Duration(seconds: 30));
+    } catch (e) {
+      debugPrint('Error handling drowsiness detection: $e');
+    } finally {
+      _isDrowsyAlertActive = false;
+    }
+  }
+
+  Future<void> _handlePhoneUsageDetection(AlertLevel level) async {
+    if (_isPhoneAlertActive) return;
+
+    _isPhoneAlertActive = true;
+    _phoneUsageEventCount++;
+
+    debugPrint('📱 Phone usage detected! Level: $level, Count: $_phoneUsageEventCount');
+
+    try {
+      // 알림 표시
       await _notificationService.showAlert(
         DetectionType.phoneUsage,
-        phoneUsageLevel,
-        _getPhoneUsageMessage(phoneUsageLevel),
+        level,
+        '휴대전화 사용이 감지되었습니다. 안전 운전하세요.',
       );
 
-      // 이벤트 기록
-      await _recordEvent(DetectionType.phoneUsage, phoneUsageLevel);
+      // 데이터베이스에 저장
+      if (_currentSessionId != null) {
+        final event = DetectionEvent(
+          sessionId: _currentSessionId!,
+          type: DetectionType.phoneUsage,
+          level: level,
+          timestamp: DateTime.now(),
+          notes: '휴대전화 사용 감지',
+        );
+        await _databaseService.createEvent(event);
+        debugPrint('Phone usage event saved to database');
+      }
+
+      // 쿨다운 (20초)
+      await Future.delayed(const Duration(seconds: 20));
+    } catch (e) {
+      debugPrint('Error handling phone usage detection: $e');
+    } finally {
+      _isPhoneAlertActive = false;
     }
   }
 
-  String _getDrowsinessMessage(AlertLevel level) {
-    switch (level) {
-      case AlertLevel.caution:
-        return '졸음 징후가 감지되었습니다. 주의하세요.';
-      case AlertLevel.warning:
-        return '졸음운전 위험! 잠시 휴식을 취하세요.';
-      case AlertLevel.danger:
-        return '⚠️ 즉시 안전한 곳에 정차하세요!';
-      default:
-        return '';
+  void _onBehaviorDetected(DrivingBehaviorEvent event) async {
+    try {
+      // 알림 표시
+      DetectionType notificationType = DetectionType.drowsiness; // 기본값
+      String message = '';
+      AlertLevel alertLevel = event.severity >= 2 ? AlertLevel.warning : AlertLevel.caution;
+      
+      switch (event.type) {
+        case DrivingBehaviorType.harshAcceleration:
+          message = '급가속이 감지되었습니다. 부드럽게 운전하세요.';
+          break;
+        case DrivingBehaviorType.harshBraking:
+          message = '급감속이 감지되었습니다. 안전거리를 유지하세요.';
+          break;
+        case DrivingBehaviorType.harshTurn:
+          message = '급회전이 감지되었습니다. 천천히 회전하세요.';
+          break;
+      }
+
+      await _notificationService.showAlert(
+        notificationType,
+        alertLevel,
+        message,
+      );
+
+      // 데이터베이스에 저장
+      if (_currentSessionId != null) {
+        final eventWithSession = DrivingBehaviorEvent(
+          sessionId: _currentSessionId,
+          type: event.type,
+          timestamp: event.timestamp,
+          latitude: event.latitude,
+          longitude: event.longitude,
+          speed: event.speed,
+          acceleration: event.acceleration,
+          turnRate: event.turnRate,
+          severity: event.severity,
+        );
+        await _databaseService.createBehaviorEvent(eventWithSession);
+      }
+    } catch (e) {
+      debugPrint('Error handling behavior event: $e');
     }
-  }
-
-  String _getPhoneUsageMessage(AlertLevel level) {
-    switch (level) {
-      case AlertLevel.caution:
-        return '휴대전화 사용이 의심됩니다.';
-      case AlertLevel.warning:
-        return '운전 중 휴대전화 사용은 위험합니다!';
-      case AlertLevel.danger:
-        return '⚠️ 휴대전화를 내려놓으세요!';
-      default:
-        return '';
-    }
-  }
-
-  Future<void> _recordEvent(DetectionType type, AlertLevel level) async {
-    if (_currentSessionId == null) return;
-
-    final event = DetectionEvent(
-      sessionId: _currentSessionId!,
-      type: type,
-      level: level,
-      timestamp: DateTime.now(),
-    );
-
-    await _databaseService.createEvent(event);
   }
 
   Future<void> _adjustPollingRate() async {
-    final batteryLevel = await _battery.batteryLevel;
+    try {
+      final batteryLevel = await _battery.batteryLevel;
 
-    int newRate;
-    if (batteryLevel > 70) {
-      newRate = AppConstants.POLLING_RATES['high_battery']!;
-    } else if (batteryLevel > 30) {
-      newRate = AppConstants.POLLING_RATES['medium_battery']!;
-    } else {
-      newRate = AppConstants.POLLING_RATES['low_battery']!;
-    }
-
-    if (newRate != _currentPollingRate) {
-      _currentPollingRate = newRate;
-      print('Polling rate adjusted to: $_currentPollingRate seconds');
-      
-      // 타이머 재시작
-      if (_isMonitoring) {
-        _startPeriodicMonitoring();
+      if (batteryLevel >= 70) {
+        _currentPollingRate = AppConstants.POLLING_RATES['high_battery']!;
+      } else if (batteryLevel >= 30) {
+        _currentPollingRate = AppConstants.POLLING_RATES['medium_battery']!;
+      } else {
+        _currentPollingRate = AppConstants.POLLING_RATES['low_battery']!;
       }
+
+      debugPrint('Polling rate adjusted: $_currentPollingRate seconds (Battery: $batteryLevel%)');
+    } catch (e) {
+      debugPrint('Error adjusting polling rate: $e');
+      _currentPollingRate = 2; // 기본값
     }
   }
 
   Future<void> stopMonitoring() async {
     if (!_isMonitoring) return;
 
-    _isMonitoring = false;
-    _monitoringTimer?.cancel();
-    _cameraController?.stopImageStream();
+    try {
+      _isMonitoring = false;
 
-    // 세션 종료
-    if (_currentSessionId != null && _sessionStartTime != null) {
-      final duration = DateTime.now().difference(_sessionStartTime!).inMinutes;
-      
-      final score = DetectionAlgorithms.calculateDrivingScore(
-        drowsinessEvents: _drowsinessEventCount,
-        phoneUsageEvents: _phoneUsageEventCount,
-        durationMinutes: duration,
-      );
+      // 이미지 스트림 중지
+      try {
+        await _cameraController?.stopImageStream();
+      } catch (e) {
+        debugPrint('Error stopping image stream: $e');
+      }
 
-      final session = DrivingSession(
-        id: _currentSessionId,
-        startTime: _sessionStartTime!,
-        endTime: DateTime.now(),
-        drowsinessEvents: _drowsinessEventCount,
-        phoneUsageEvents: _phoneUsageEventCount,
-        score: score,
-        durationMinutes: duration,
-      );
+      // GPS 중지
+      _gpsService.stopMonitoring();
 
-      await _databaseService.updateSession(session);
+      // 타이머 중지
+      _batteryCheckTimer?.cancel();
+      _batteryCheckTimer = null;
+
+      // 세션 종료
+      if (_currentSessionId != null && _sessionStartTime != null) {
+        final endTime = DateTime.now();
+        final duration = endTime.difference(_sessionStartTime!);
+
+        // GPS 통계 가져오기
+        final behaviorStats = _gpsService.getBehaviorStatistics();
+        final gpsScore = _gpsService.calculateBehaviorScore();
+        final drivingStats = _gpsService.getDrivingStatistics();
+
+        // 점수 계산
+        double score = 100.0;
+        score -= _drowsinessEventCount * AppConstants.DROWSINESS_PENALTY;
+        score -= _phoneUsageEventCount * AppConstants.PHONE_USAGE_PENALTY;
+        score -= gpsScore;
+        score = score.clamp(0.0, 100.0);
+
+        final session = DrivingSession(
+          id: _currentSessionId,
+          startTime: _sessionStartTime!,
+          endTime: endTime,
+          drowsinessEvents: _drowsinessEventCount,
+          phoneUsageEvents: _phoneUsageEventCount,
+          harshAccelerationEvents: behaviorStats['harshAcceleration'] ?? 0,
+          harshBrakingEvents: behaviorStats['harshBraking'] ?? 0,
+          harshTurnEvents: behaviorStats['harshTurn'] ?? 0,
+          score: score,
+          durationMinutes: duration.inMinutes,
+          totalDistance: drivingStats['totalDistance'],
+          maxSpeed: drivingStats['maxSpeed'],
+          averageSpeed: drivingStats['averageSpeed'],
+        );
+
+        await _databaseService.updateSession(session);
+        debugPrint('Session ended: ID $_currentSessionId, Score: ${score.toStringAsFixed(1)}');
+        debugPrint('  Distance: ${drivingStats['totalDistance']?.toStringAsFixed(1)} km');
+        debugPrint('  Max Speed: ${drivingStats['maxSpeed']?.toStringAsFixed(0)} km/h');
+        debugPrint('  Avg Speed: ${drivingStats['averageSpeed']?.toStringAsFixed(0)} km/h');
+      }
+
+      // 초기화
+      _currentSessionId = null;
+      _sessionStartTime = null;
+      _drowsinessEventCount = 0;
+      _phoneUsageEventCount = 0;
+      _isDrowsyAlertActive = false;
+      _isPhoneAlertActive = false;
+
+      debugPrint('Monitoring stopped successfully');
+    } catch (e) {
+      debugPrint('Error stopping monitoring: $e');
     }
-
-    // 카운터 리셋
-    _drowsinessEventCount = 0;
-    _phoneUsageEventCount = 0;
-    _currentSessionId = null;
-    _sessionStartTime = null;
-
-    print('Monitoring stopped');
   }
 
-  void dispose() {
-    _monitoringTimer?.cancel();
-    _cameraController?.dispose();
-    _faceDetectionService.dispose();
-    _notificationService.dispose();
+  Future<void> dispose() async {
+    await stopMonitoring();
+    await _cameraController?.dispose();
+    _cameraController = null;
+    _gpsService.dispose();
   }
-
-  bool get isMonitoring => _isMonitoring;
-  int get currentPollingRate => _currentPollingRate;
 }
