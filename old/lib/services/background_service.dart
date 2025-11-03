@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:battery_plus/battery_plus.dart';
-import 'package:geolocator/geolocator.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'face_detection_service.dart';
 import 'notification_service.dart';
 import 'database_service.dart';
@@ -11,7 +11,6 @@ import '../utils/constants.dart';
 import '../utils/detection_algorithms.dart';
 
 class BackgroundMonitoringService {
-  // [중요] 백그라운드 Isolate에서만 인스턴스가 생성되어야 함
   static final BackgroundMonitoringService instance =
       BackgroundMonitoringService._init();
 
@@ -22,7 +21,6 @@ class BackgroundMonitoringService {
 
   CameraController? _cameraController;
   Timer? _batteryCheckTimer;
-  StreamSubscription<Position>? _gpsSubscription;
 
   int _currentPollingRate = 1;
   int? _currentSessionId;
@@ -32,6 +30,7 @@ class BackgroundMonitoringService {
 
   bool _isMonitoring = false;
 
+  // 이벤트 카운트 쿨다운 플래그
   bool _isDrowsyAlertActive = false;
   bool _isPhoneAlertActive = false;
 
@@ -40,39 +39,14 @@ class BackgroundMonitoringService {
   CameraController? get cameraController => _cameraController;
 
   Future<void> initialize() async {
-    // 알림 서비스 초기화 (main.dart에서도 호출하지만, Isolate에서 한 번 더 보장)
     await _notificationService.initialize();
-
-    // GPS 권한 및 서비스 활성화 확인 (권한은 main에서 이미 요청했어야 함)
-    await _initializeGps();
-
-    // 카메라 초기화
     await _initializeCamera();
-  }
-
-  Future<void> _initializeGps() async {
-    try {
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        print('Location services are disabled.');
-      }
-      // 권한 확인 (이미 main에서 요청했지만, 여기서도 확인)
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        print('Location permissions are denied. Cannot start GPS.');
-        throw Exception('Location permissions are denied.');
-      }
-      print('GPS initialized');
-    } catch (e) {
-      print('GPS initialization error: $e');
-      rethrow; // 에러를 상위로 전파하여 서비스 시작 중단
-    }
   }
 
   Future<void> _initializeCamera() async {
     try {
       final cameras = await availableCameras();
+
       final frontCamera = cameras.firstWhere(
         (camera) => camera.lensDirection == CameraLensDirection.front,
         orElse: () => cameras.first,
@@ -86,10 +60,8 @@ class BackgroundMonitoringService {
       );
 
       await _cameraController!.initialize();
-      print("Camera initialized");
     } catch (e) {
       print('Camera initialization error: $e');
-      rethrow; // 에러를 상위로 전파하여 서비스 시작 중단
     }
   }
 
@@ -97,11 +69,16 @@ class BackgroundMonitoringService {
     if (_isMonitoring) return;
 
     if (_cameraController == null || !_cameraController!.value.isInitialized) {
-      print("Camera not ready. Cannot start monitoring.");
-      return;
+      print("Camera not ready, initializing...");
+      await _initializeCamera();
+      if (_cameraController == null ||
+          !_cameraController!.value.isInitialized) {
+        print("Camera failed to initialize. Cannot start monitoring.");
+        return;
+      }
     }
 
-    // [제거] FlutterBackgroundService().startService();
+    FlutterBackgroundService().startService();
 
     _isMonitoring = true;
     _sessionStartTime = DateTime.now();
@@ -114,7 +91,6 @@ class BackgroundMonitoringService {
     await _adjustPollingRate();
 
     _startImageProcessingStream();
-    _startGpsMonitoring();
 
     _batteryCheckTimer?.cancel();
     _batteryCheckTimer = Timer.periodic(
@@ -139,9 +115,10 @@ class BackgroundMonitoringService {
 
     try {
       _cameraController!.startImageStream((CameraImage image) async {
-        if (!_isMonitoring) return;
+        if (!_isMonitoring) {
+          return;
+        }
 
-        // 이 로직은 이제 백그라운드 스레드에서 실행됩니다.
         final result = await _faceDetectionService.processImage(image);
 
         if (result['faceDetected'] == true) {
@@ -153,70 +130,65 @@ class BackgroundMonitoringService {
     }
   }
 
-  void _startGpsMonitoring() {
-    _gpsSubscription?.cancel();
-    _gpsSubscription = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 10,
-      ),
-    ).listen((Position position) {
-      if (!_isMonitoring) return;
-
-      // --- [여기에 GPS 데이터 처리 로직 구현] ---
-      // (예: 과속, 급정거 감지 등)
-      // print('Current Speed: ${position.speed * 3.6} km/h');
-      // ------------------------------------
-    }, onError: (e) {
-      print('GPS Stream Error: $e');
-    });
-  }
-
-  // --- (졸음 감지 로직 _handleDetectionResult는 원본과 동일) ---
+  // --- 수정된 부분: 탐지 안되는 버그 수정 ---
   Future<void> _handleDetectionResult(Map<String, dynamic> result) async {
     final drowsinessLevel = result['drowsinessLevel'] as AlertLevel;
     final phoneUsageLevel = result['phoneUsageLevel'] as AlertLevel;
 
     // --- 졸음운전 감지 로직 ---
+    // '경고' 또는 '위험' 단계일 때
     if (drowsinessLevel == AlertLevel.warning ||
         drowsinessLevel == AlertLevel.danger) {
+      // 쿨다운 플래그가 false일 때만 이벤트로 간주 (최초 1회)
       if (!_isDrowsyAlertActive) {
-        _isDrowsyAlertActive = true;
-        _drowsinessEventCount++;
+        _isDrowsyAlertActive = true; // 쿨다운 활성화
+        _drowsinessEventCount++; // 카운트 1 증가
+
         print(
             "--- NEW DROWSINESS EVENT DETECTED (Total: $_drowsinessEventCount) ---");
+
         await _notificationService.showAlert(
           DetectionType.drowsiness,
           drowsinessLevel,
           _getDrowsinessMessage(drowsinessLevel),
         );
+
         await _recordEvent(DetectionType.drowsiness, drowsinessLevel);
       }
     } else if (drowsinessLevel == AlertLevel.normal) {
+      // '정상' 상태가 되면 쿨다운 해제
       _isDrowsyAlertActive = false;
     }
+    // (참고) '주의' 단계(caution)에서는 쿨다운 플래그를 건드리지 않음
 
     // --- 휴대전화 사용 감지 로직 ---
+    // '경고' 또는 '위험' 단계일 때
     if (phoneUsageLevel == AlertLevel.warning ||
         phoneUsageLevel == AlertLevel.danger) {
+      // 쿨다운 플래그가 false일 때만 이벤트로 간주 (최초 1회)
       if (!_isPhoneAlertActive) {
-        _isPhoneAlertActive = true;
-        _phoneUsageEventCount++;
+        _isPhoneAlertActive = true; // 쿨다운 활성화
+        _phoneUsageEventCount++; // 카운트 1 증가
+
         print(
             "--- NEW PHONE USAGE EVENT DETECTED (Total: $_phoneUsageEventCount) ---");
+
         await _notificationService.showAlert(
           DetectionType.phoneUsage,
           phoneUsageLevel,
           _getPhoneUsageMessage(phoneUsageLevel),
         );
+
         await _recordEvent(DetectionType.phoneUsage, phoneUsageLevel);
       }
     } else if (phoneUsageLevel == AlertLevel.normal) {
+      // '정상' 상태가 되면 쿨다운 해제
       _isPhoneAlertActive = false;
     }
+    // (참고) '주의' 단계(caution)에서는 쿨다운 플래그를 건드리지 않음
   }
+  // --- 수정 끝 ---
 
-  // --- (_getDrowsinessMessage, _getPhoneUsageMessage, _recordEvent, _adjustPollingRate는 원본과 동일) ---
   String _getDrowsinessMessage(AlertLevel level) {
     switch (level) {
       case AlertLevel.caution:
@@ -245,17 +217,20 @@ class BackgroundMonitoringService {
 
   Future<void> _recordEvent(DetectionType type, AlertLevel level) async {
     if (_currentSessionId == null) return;
+
     final event = DetectionEvent(
       sessionId: _currentSessionId!,
       type: type,
       level: level,
       timestamp: DateTime.now(),
     );
+
     await _databaseService.createEvent(event);
   }
 
   Future<void> _adjustPollingRate() async {
     final batteryLevel = await _battery.batteryLevel;
+
     int newRate;
     if (batteryLevel > 70) {
       newRate = AppConstants.POLLING_RATES['high_battery']!;
@@ -277,23 +252,23 @@ class BackgroundMonitoringService {
     _isMonitoring = false;
     _batteryCheckTimer?.cancel();
     _cameraController?.stopImageStream();
-    _gpsSubscription?.cancel();
-    _gpsSubscription = null;
 
-    // [제거] FlutterBackgroundService().invoke("stopService");
+    FlutterBackgroundService().invoke("stopService");
 
     if (_currentSessionId != null && _sessionStartTime != null) {
-      // ... (세션 저장 로직은 원본과 동일) ...
       final endTime = DateTime.now();
       final duration = endTime.difference(_sessionStartTime!);
+
       final durationInMinutes = (duration.inSeconds / 60).ceil();
       final effectiveDurationMinutes =
           durationInMinutes < 1 ? 1 : durationInMinutes;
+
       final score = DetectionAlgorithms.calculateDrivingScore(
         drowsinessEvents: _drowsinessEventCount,
         phoneUsageEvents: _phoneUsageEventCount,
         durationMinutes: effectiveDurationMinutes,
       );
+
       final session = DrivingSession(
         id: _currentSessionId,
         startTime: _sessionStartTime!,
@@ -303,6 +278,7 @@ class BackgroundMonitoringService {
         score: score,
         durationMinutes: durationInMinutes,
       );
+
       await _databaseService.updateSession(session);
     }
 
@@ -311,22 +287,17 @@ class BackgroundMonitoringService {
     _phoneUsageEventCount = 0;
     _currentSessionId = null;
     _sessionStartTime = null;
-    _isDrowsyAlertActive = false;
-    _isPhoneAlertActive = false;
+    _isDrowsyAlertActive = false; // 플래그 리셋
+    _isPhoneAlertActive = false; // 플래그 리셋
 
-    // 서비스 종료 시 리소스 즉시 해제
-    dispose();
-
-    print('Monitoring stopped and resources disposed');
+    print('Monitoring stopped');
   }
 
   void dispose() {
     _batteryCheckTimer?.cancel();
     _cameraController?.dispose();
-    _gpsSubscription?.cancel();
     _faceDetectionService.dispose();
     _notificationService.dispose();
-    print("All services disposed.");
   }
 
   bool get isMonitoring => _isMonitoring;

@@ -37,12 +37,11 @@ class FaceDetectionService {
     try {
       // CameraImage를 InputImage로 변환
       final inputImage = _convertCameraImage(image);
-
+      
       // 얼굴 감지
       final faces = await _faceDetector.processImage(inputImage);
 
       if (faces.isEmpty) {
-        _isProcessing = false; // [수정] 즉시 false로 변경
         return {
           'drowsinessLevel': AlertLevel.normal,
           'phoneUsageLevel': AlertLevel.normal,
@@ -59,7 +58,6 @@ class FaceDetectionService {
       // 휴대전화 사용 감지
       final phoneUsageLevel = DetectionAlgorithms.detectPhoneUsage(face);
 
-      _isProcessing = false; // [수정] 즉시 false로 변경
       return {
         'drowsinessLevel': drowsinessLevel,
         'phoneUsageLevel': phoneUsageLevel,
@@ -70,40 +68,36 @@ class FaceDetectionService {
       };
     } catch (e) {
       print('Face detection error: $e');
-      _isProcessing = false; // [수정] 즉시 false로 변경
       return {
         'drowsinessLevel': AlertLevel.normal,
         'phoneUsageLevel': AlertLevel.normal,
         'faceDetected': false,
         'error': e.toString(),
       };
+    } finally {
+      _isProcessing = false;
     }
-    // [제거] finally { _isProcessing = false; }
-    // finally 블록은 try/catch 블록보다 늦게 실행될 수 있어
-    // _isProcessing 플래그가 늦게 해제되는 것을 방지합니다.
   }
 
   InputImage _convertCameraImage(CameraImage image) {
-    // [중요] 이 변환 로직은 안드로이드 기기마다 다를 수 있습니다.
-    // 전면 카메라의 센서 방향에 따라 rotation을 조절해야 할 수 있습니다.
-    // (예: InputImageRotation.rotation270deg)
-
-    // NV21 포맷(Android 기본값)은 모든 플레인을 합칠 필요 없이
-    // bytes 리스트를 바로 사용하는 것이 더 효율적일 수 있습니다.
-    final bytes = image.planes[0].bytes;
+    // CameraImage를 InputImage로 변환하는 로직
+    // 실제 구현에서는 이미지 회전 및 포맷 변환 필요
+    
+    final BytesBuilder allBytes = BytesBuilder();
+    for (final Plane plane in image.planes) {
+      allBytes.add(plane.bytes);
+    }
+    final bytes = allBytes.toBytes();
 
     final imageSize = Size(
       image.width.toDouble(),
       image.height.toDouble(),
     );
 
-    // [중요] 카메라 플러그인과 ML Kit 버전에 따라 InputImageRotation 설정이 중요합니다.
-    // 대부분의 전면 카메라는 90도 또는 270도 회전이 필요합니다.
-    // 얼굴 인식이 안된다면 rotation0deg를 rotation270deg로 바꿔보세요.
+    // InputImage 생성
     final inputImageData = InputImageMetadata(
       size: imageSize,
-      rotation: InputImageRotation
-          .rotation270deg, // [수정] 0deg -> 270deg (일반적인 전면 카메라 값)
+      rotation: InputImageRotation.rotation0deg,
       format: InputImageFormat.nv21,
       bytesPerRow: image.planes[0].bytesPerRow,
     );
@@ -119,3 +113,4 @@ class FaceDetectionService {
     DetectionAlgorithms.resetCounters();
   }
 }
+

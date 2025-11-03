@@ -1,8 +1,15 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'screens/home_screen.dart';
 import 'services/notification_service.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +23,57 @@ void main() async {
   // 알림 서비스 초기화
   await NotificationService.instance.initialize();
 
+  // 백그라운드 서비스 초기화
+  await initializeService();
+
   runApp(const SafeDriveApp());
+}
+
+/// 백그라운드 서비스 설정
+Future<void> initializeService() async {
+  final service = FlutterBackgroundService();
+
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'safedrive_channel',
+    'SafeDrive Background',
+    description: '운전 중 안전 상태 감시 서비스',
+    importance: Importance.low,
+  );
+
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(channel);
+
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart,
+      autoStart: false, // (수정) true에서 false로 변경
+      isForegroundMode: true,
+      notificationChannelId: 'safedrive_channel',
+      initialNotificationTitle: 'SafeDrive AI 실행 중',
+      initialNotificationContent: '운전 상태를 감시하고 있습니다.',
+      foregroundServiceNotificationId: 888,
+    ),
+    iosConfiguration: IosConfiguration(),
+  );
+
+  // (수정) 여기서 startService()를 호출하지 않음. 사용자가 버튼을 눌러 시작.
+  // await service.startService();
+}
+
+/// 실제 백그라운드 동작
+@pragma('vm:entry-point')
+void onStart(ServiceInstance service) async {
+  if (service is AndroidServiceInstance) {
+    service.on('stopService').listen((event) {
+      service.stopSelf(); // "stopService" 메시지를 받으면 서비스 중지
+    });
+  }
+
+  // (수정) 5초마다 로그 출력하는 Timer.periodic 제거
+  // 이 서비스는 이제 알림을 표시하고, 'stopService' 신호를 기다리는 역할만 함.
+  debugPrint("✅ SafeDrive Background Service Initialized (onStart).");
 }
 
 class SafeDriveApp extends StatelessWidget {
@@ -69,7 +126,6 @@ class _PermissionScreenState extends State<PermissionScreen> {
   }
 
   Future<void> _checkPermissions() async {
-    // 필요한 권한 확인
     final cameraStatus = await Permission.camera.status;
     final notificationStatus = await Permission.notification.status;
 
@@ -87,7 +143,7 @@ class _PermissionScreenState extends State<PermissionScreen> {
   }
 
   Future<void> _requestPermissions() async {
-    final Map<Permission, PermissionStatus> statuses = await [
+    final statuses = await [
       Permission.camera,
       Permission.notification,
     ].request();
