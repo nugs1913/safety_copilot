@@ -14,47 +14,60 @@ SafeDrive AI는 인공지능을 활용하여 운전 중 졸음운전과 휴대�
 ### 2. 졸음운전 감지
 - Eye Aspect Ratio (EAR) 기반 눈 감김 감지
 - 고개 각도 분석을 통한 졸음 징후 파악
-- 3단계 경고 시스템 (경고 → 주의 → 위험)
+- 3단계 경고 시스템 (주의 → 경고 → 위험)
 
 ### 3. 휴대전화 사용 감지
 - 얼굴 각도 분석
 - 고개를 숙이고 있는 패턴 감지
 - 즉각적인 알림
 
-### 4. 배터리 최적화
+### 4. GPS 기반 운전 행동 분석 🆕
+- **급가속 감지**: 2.5 m/s² 이상
+- **급제동 감지**: 3.0 m/s² 이상
+- **급회전 감지**: 30°/s 이상
+- **실시간 속도 표시**
+- **주행 거리 자동 기록**
+- **최고/평균 속도 통계**
+
+### 5. 배터리 최적화
 - 배터리 레벨에 따른 동적 폴링 레이트 조정
   - 70% 이상: 1초마다
   - 30-70%: 2초마다
   - 30% 이하: 5초마다
 
-### 5. 운전 점수 시스템
+### 6. 운전 점수 시스템
 - 감지 이벤트 기반 점수 산정
+- GPS 행동 분석 포함
 - S~F 등급 평가
 - 시각적 차트로 추이 확인
 
-### 6. 주행 기록 관리
+### 7. 주행 기록 관리
 - SQLite 기반 로컬 데이터베이스
-- 상세한 이벤트 로그
-- 통계 및 분석
+- 상세한 이벤트 로그 (얼굴 + GPS)
+- 주행 통계 및 분석
+- 이벤트별 위치 정보 저장
 
 ## 🛠 기술 스택
 
 - **Framework**: Flutter 3.x
 - **언어**: Dart
 - **ML**: Google ML Kit (Face Detection)
+- **위치**: Geolocator (GPS)
 - **데이터베이스**: SQLite
 - **상태관리**: Provider
 - **차트**: fl_chart
-- **알림**: flutter_local_notifications
+- **알림**: flutter_local_notifications, audioplayers
 - **백그라운드**: flutter_background_service
 
 ## 📋 시스템 요구사항
 
 - Flutter SDK 3.0 이상
-- Android: minSdkVersion 21 (Android 5.0 Lollipop) 이상
-- Android: compileSdk 36 (일부 플러그인 요구사항)
+- Android: minSdkVersion 26 (Android 8.0 Oreo) 이상
+- Android: compileSdk 36
 - iOS: iOS 12.0 이상
 - 전면 카메라 필수
+- GPS 지원 필수
+- 최소 2GB RAM 권장
 
 ## 🚀 설치 및 실행
 
@@ -79,13 +92,23 @@ flutter run
 ```
 
 ### 4. 빌드
+
 ```bash
-# Android APK
-flutter build apk --release
+# Android APK (테스트용)
+flutter build apk --release --split-per-abi
+
+# Android AAB (Play Store 배포용)
+flutter build appbundle --release
 
 # iOS
 flutter build ios --release
 ```
+
+자세한 빌드 및 배포 가이드는 아래 문서를 참조하세요:
+
+- 📘 **[BUILD.md](BUILD.md)**: 빠른 빌드 가이드
+- 📗 **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**: Google Play Store 배포 절차
+- 🎨 **[ICON_GUIDE.md](ICON_GUIDE.md)**: 앱 아이콘 적용 방법
 
 ## 📁 프로젝트 구조
 
@@ -153,9 +176,16 @@ EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
 ## 🔐 권한
 
 앱은 다음 권한이 필요합니다:
-- **카메라**: 얼굴 감지
-- **알림**: 위험 상황 경고
-- **진동**: 긴급 알림
+- **카메라**: 얼굴 감지를 통한 졸음/휴대전화 사용 감지
+- **위치 (GPS)**: 운전 행동 분석 (급가속/급제동/급회전)
+- **알림**: 위험 상황 푸시 알림
+- **진동**: 긴급 경고 알림
+
+**개인정보 보호:**
+- 모든 데이터는 기기 내부에만 저장
+- 서버 전송 없음
+- 카메라는 얼굴 감지만 사용 (영상 저장 안 함)
+- 위치는 운전 행동 분석에만 활용
 
 ## 🎯 향후 개발 계획
 
