@@ -8,11 +8,18 @@ class NotificationService {
 
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
-  final AudioPlayer _audioPlayer = AudioPlayer();
+  AudioPlayer? _audioPlayer;
+  bool _isInitialized = false;
 
   NotificationService._init();
 
   Future<void> initialize() async {
+    // 이미 초기화된 경우 스킵
+    if (_isInitialized) {
+      print('NotificationService already initialized');
+      return;
+    }
+
     // 1. 알림 채널 초기화
     const AndroidInitializationSettings androidInit =
         AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -24,9 +31,12 @@ class NotificationService {
 
     await _notifications.initialize(initSettings);
 
-    // 2. 오디오 플레이어 설정
-    // 앱이 종료되어도 오디오가 계속 재생되는 것을 방지
-    await _audioPlayer.setReleaseMode(ReleaseMode.stop);
+    // 2. 오디오 플레이어 생성 및 설정
+    _audioPlayer = AudioPlayer();
+    await _audioPlayer!.setReleaseMode(ReleaseMode.stop);
+
+    _isInitialized = true;
+    print('NotificationService initialized');
   }
 
   /// 위험 경고 알림 표시 (진동 및 소리 포함)
@@ -52,8 +62,11 @@ class NotificationService {
 
     // 2. 소리 재생
     try {
-      // (중요) 'assets/sounds/' 안의 실제 파일명으로 변경하세요.
-      await _audioPlayer.play(AssetSource('sounds/medium_alarm.mp3'));
+      if (_audioPlayer != null) {
+        await _audioPlayer!.play(AssetSource('sounds/medium_alarm.mp3'));
+      } else {
+        print('AudioPlayer not initialized');
+      }
     } catch (e) {
       print('AudioPlayer error: $e');
     }
@@ -86,6 +99,9 @@ class NotificationService {
   }
 
   void dispose() {
-    _audioPlayer.dispose();
+    _audioPlayer?.dispose();
+    _audioPlayer = null;
+    _isInitialized = false;
+    print('NotificationService disposed');
   }
 }
