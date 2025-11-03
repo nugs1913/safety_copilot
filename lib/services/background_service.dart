@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:battery_plus/battery_plus.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter/foundation.dart';
 import 'face_detection_service.dart';
 import 'notification_service.dart';
@@ -10,6 +11,7 @@ import '../models/detection_event.dart';
 import '../models/driving_session.dart';
 import '../models/driving_behavior_event.dart';
 import '../utils/constants.dart';
+import '../utils/detection_algorithms.dart';
 
 class BackgroundMonitoringService {
   static final BackgroundMonitoringService instance =
@@ -89,19 +91,21 @@ class BackgroundMonitoringService {
 
     try {
       // 카메라 확인
-      if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      if (_cameraController == null ||
+          !_cameraController!.value.isInitialized) {
         debugPrint("Camera not ready, initializing...");
         await _initializeCamera();
-        
-        if (_cameraController == null || !_cameraController!.value.isInitialized) {
+
+        if (_cameraController == null ||
+            !_cameraController!.value.isInitialized) {
           throw Exception("Camera failed to initialize");
         }
       }
 
+      FlutterBackgroundService().startService();
+
       _isMonitoring = true;
       _sessionStartTime = DateTime.now();
-      _drowsinessEventCount = 0;
-      _phoneUsageEventCount = 0;
 
       // 세션 생성
       final session = DrivingSession(
@@ -120,7 +124,8 @@ class BackgroundMonitoringService {
           debugPrint('GPS monitoring started');
           _gpsService.onBehaviorDetected = _onBehaviorDetected;
         } else {
-          debugPrint('GPS monitoring not available (permission denied or disabled)');
+          debugPrint(
+              'GPS monitoring not available (permission denied or disabled)');
         }
       } catch (e) {
         debugPrint('GPS service error: $e');
@@ -153,141 +158,123 @@ class BackgroundMonitoringService {
 
   void _startImageProcessingStream() {
     if (_cameraController == null || !_cameraController!.value.isInitialized) {
-      debugPrint('Camera not initialized for stream');
+      print("Camera not ready for stream");
       return;
     }
 
     try {
-      int frameCount = 0;
-      
-      // startImageStream은 void를 반환하므로 직접 할당하지 않음
-      _cameraController!.startImageStream((CameraImage image) {
-        frameCount++;
-        
-        // 폴링 레이트에 따라 프레임 스킵
-        if (frameCount % (30 * _currentPollingRate) != 0) {
+      _cameraController!.startImageStream((CameraImage image) async {
+        if (!_isMonitoring) {
           return;
         }
 
-        // 이미 처리 중이면 스킵
-        if (_isProcessingImage) {
-          return;
-        }
+        final result = await _faceDetectionService.processImage(image);
 
-        _isProcessingImage = true;
-        _processImage(image).whenComplete(() {
-          _isProcessingImage = false;
-        });
+        if (result['faceDetected'] == true) {
+          await _handleDetectionResult(result);
+        }
       });
-
-      debugPrint('Image stream started');
     } catch (e) {
-      debugPrint('Error starting image stream: $e');
+      print('Error starting image stream: $e');
     }
   }
 
-  Future<void> _processImage(CameraImage image) async {
-    try {
-      final result = await _faceDetectionService.processImage(image);
+  // --- 수정된 부분: 탐지 안되는 버그 수정 ---
+  Future<void> _handleDetectionResult(Map<String, dynamic> result) async {
+    final drowsinessLevel = result['drowsinessLevel'] as AlertLevel;
+    final phoneUsageLevel = result['phoneUsageLevel'] as AlertLevel;
 
-      if (result['faceDetected'] != true) return;
+    // --- 졸음운전 감지 로직 ---
+    // '경고' 또는 '위험' 단계일 때
+    if (drowsinessLevel == AlertLevel.warning ||
+        drowsinessLevel == AlertLevel.danger) {
+      // 쿨다운 플래그가 false일 때만 이벤트로 간주 (최초 1회)
+      if (!_isDrowsyAlertActive) {
+        _isDrowsyAlertActive = true; // 쿨다운 활성화
+        _drowsinessEventCount++; // 카운트 1 증가
 
-      final drowsinessLevel = result['drowsinessLevel'] as AlertLevel;
-      final phoneUsageLevel = result['phoneUsageLevel'] as AlertLevel;
+        print(
+            "--- NEW DROWSINESS EVENT DETECTED (Total: $_drowsinessEventCount) ---");
 
-      // 디버깅을 위한 로그
-      if (drowsinessLevel != AlertLevel.normal || phoneUsageLevel != AlertLevel.normal) {
-        debugPrint('Detection: drowsiness=$drowsinessLevel, phone=$phoneUsageLevel');
-      }
-
-      // 졸음 감지
-      if (drowsinessLevel != AlertLevel.normal) {
-        await _handleDrowsinessDetection(drowsinessLevel);
-      }
-
-      // 휴대전화 사용 감지
-      if (phoneUsageLevel != AlertLevel.normal) {
-        await _handlePhoneUsageDetection(phoneUsageLevel);
-      }
-    } catch (e) {
-      debugPrint('Image processing error: $e');
-    }
-  }
-
-  Future<void> _handleDrowsinessDetection(AlertLevel level) async {
-    if (_isDrowsyAlertActive) return;
-
-    _isDrowsyAlertActive = true;
-    _drowsinessEventCount++;
-
-    debugPrint('⚠️ Drowsiness detected! Level: $level, Count: $_drowsinessEventCount');
-
-    try {
-      // 알림 표시
-      await _notificationService.showAlert(
-        DetectionType.drowsiness,
-        level,
-        '졸음이 감지되었습니다. 안전한 곳에서 휴식을 취하세요.',
-      );
-
-      // 데이터베이스에 저장
-      if (_currentSessionId != null) {
-        final event = DetectionEvent(
-          sessionId: _currentSessionId!,
-          type: DetectionType.drowsiness,
-          level: level,
-          timestamp: DateTime.now(),
-          notes: '졸음 감지',
+        await _notificationService.showAlert(
+          DetectionType.drowsiness,
+          drowsinessLevel,
+          _getDrowsinessMessage(drowsinessLevel),
         );
-        await _databaseService.createEvent(event);
-        debugPrint('Drowsiness event saved to database');
-      }
 
-      // 쿨다운 (30초)
-      await Future.delayed(const Duration(seconds: 30));
-    } catch (e) {
-      debugPrint('Error handling drowsiness detection: $e');
-    } finally {
+        await _recordEvent(DetectionType.drowsiness, drowsinessLevel);
+      }
+    } else if (drowsinessLevel == AlertLevel.normal) {
+      // '정상' 상태가 되면 쿨다운 해제
       _isDrowsyAlertActive = false;
     }
-  }
+    // (참고) '주의' 단계(caution)에서는 쿨다운 플래그를 건드리지 않음
 
-  Future<void> _handlePhoneUsageDetection(AlertLevel level) async {
-    if (_isPhoneAlertActive) return;
+    // --- 휴대전화 사용 감지 로직 ---
+    // '경고' 또는 '위험' 단계일 때
+    if (phoneUsageLevel == AlertLevel.warning ||
+        phoneUsageLevel == AlertLevel.danger) {
+      // 쿨다운 플래그가 false일 때만 이벤트로 간주 (최초 1회)
+      if (!_isPhoneAlertActive) {
+        _isPhoneAlertActive = true; // 쿨다운 활성화
+        _phoneUsageEventCount++; // 카운트 1 증가
 
-    _isPhoneAlertActive = true;
-    _phoneUsageEventCount++;
+        print(
+            "--- NEW PHONE USAGE EVENT DETECTED (Total: $_phoneUsageEventCount) ---");
 
-    debugPrint('📱 Phone usage detected! Level: $level, Count: $_phoneUsageEventCount');
-
-    try {
-      // 알림 표시
-      await _notificationService.showAlert(
-        DetectionType.phoneUsage,
-        level,
-        '휴대전화 사용이 감지되었습니다. 안전 운전하세요.',
-      );
-
-      // 데이터베이스에 저장
-      if (_currentSessionId != null) {
-        final event = DetectionEvent(
-          sessionId: _currentSessionId!,
-          type: DetectionType.phoneUsage,
-          level: level,
-          timestamp: DateTime.now(),
-          notes: '휴대전화 사용 감지',
+        await _notificationService.showAlert(
+          DetectionType.phoneUsage,
+          phoneUsageLevel,
+          _getPhoneUsageMessage(phoneUsageLevel),
         );
-        await _databaseService.createEvent(event);
-        debugPrint('Phone usage event saved to database');
-      }
 
-      // 쿨다운 (20초)
-      await Future.delayed(const Duration(seconds: 20));
-    } catch (e) {
-      debugPrint('Error handling phone usage detection: $e');
-    } finally {
+        await _recordEvent(DetectionType.phoneUsage, phoneUsageLevel);
+      }
+    } else if (phoneUsageLevel == AlertLevel.normal) {
+      // '정상' 상태가 되면 쿨다운 해제
       _isPhoneAlertActive = false;
     }
+    // (참고) '주의' 단계(caution)에서는 쿨다운 플래그를 건드리지 않음
+  }
+  // --- 수정 끝 ---
+
+  String _getDrowsinessMessage(AlertLevel level) {
+    switch (level) {
+      case AlertLevel.caution:
+        return '졸음 징후가 감지되었습니다. 주의하세요.';
+      case AlertLevel.warning:
+        return '졸음운전 위험! 잠시 휴식을 취하세요.';
+      case AlertLevel.danger:
+        return '⚠️ 즉시 안전한 곳에 정차하세요!';
+      default:
+        return '';
+    }
+  }
+
+  String _getPhoneUsageMessage(AlertLevel level) {
+    switch (level) {
+      case AlertLevel.caution:
+        return '휴대전화 사용이 의심됩니다.';
+      case AlertLevel.warning:
+        return '운전 중 휴대전화 사용은 위험합니다!';
+      case AlertLevel.danger:
+        return '⚠️ 휴대전화를 내려놓으세요!';
+      default:
+        return '';
+    }
+  }
+
+  Future<void> _recordEvent(DetectionType type, AlertLevel level) async {
+    if (_currentSessionId == null) return;
+
+    final event = DetectionEvent(
+      sessionId: _currentSessionId!,
+      type: type,
+      level: level,
+      timestamp: DateTime.now(),
+    );
+
+    await _databaseService.createEvent(event);
   }
 
   void _onBehaviorDetected(DrivingBehaviorEvent event) async {
@@ -295,8 +282,9 @@ class BackgroundMonitoringService {
       // 알림 표시
       DetectionType notificationType = DetectionType.drowsiness; // 기본값
       String message = '';
-      AlertLevel alertLevel = event.severity >= 2 ? AlertLevel.warning : AlertLevel.caution;
-      
+      AlertLevel alertLevel =
+          event.severity >= 2 ? AlertLevel.warning : AlertLevel.caution;
+
       switch (event.type) {
         case DrivingBehaviorType.harshAcceleration:
           message = '급가속이 감지되었습니다. 부드럽게 운전하세요.';
@@ -347,7 +335,8 @@ class BackgroundMonitoringService {
         _currentPollingRate = AppConstants.POLLING_RATES['low_battery']!;
       }
 
-      debugPrint('Polling rate adjusted: $_currentPollingRate seconds (Battery: $batteryLevel%)');
+      debugPrint(
+          'Polling rate adjusted: $_currentPollingRate seconds (Battery: $batteryLevel%)');
     } catch (e) {
       debugPrint('Error adjusting polling rate: $e');
       _currentPollingRate = 2; // 기본값
@@ -408,10 +397,14 @@ class BackgroundMonitoringService {
         );
 
         await _databaseService.updateSession(session);
-        debugPrint('Session ended: ID $_currentSessionId, Score: ${score.toStringAsFixed(1)}');
-        debugPrint('  Distance: ${drivingStats['totalDistance']?.toStringAsFixed(1)} km');
-        debugPrint('  Max Speed: ${drivingStats['maxSpeed']?.toStringAsFixed(0)} km/h');
-        debugPrint('  Avg Speed: ${drivingStats['averageSpeed']?.toStringAsFixed(0)} km/h');
+        debugPrint(
+            'Session ended: ID $_currentSessionId, Score: ${score.toStringAsFixed(1)}');
+        debugPrint(
+            '  Distance: ${drivingStats['totalDistance']?.toStringAsFixed(1)} km');
+        debugPrint(
+            '  Max Speed: ${drivingStats['maxSpeed']?.toStringAsFixed(0)} km/h');
+        debugPrint(
+            '  Avg Speed: ${drivingStats['averageSpeed']?.toStringAsFixed(0)} km/h');
       }
 
       // 초기화

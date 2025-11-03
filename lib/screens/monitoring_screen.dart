@@ -21,7 +21,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   bool _isInitialized = false;
   bool _hasError = false;
   String _errorMessage = '';
-  
+
   // 실시간 통계
   double _currentSpeed = 0.0;
   String _alertStatus = '정상';
@@ -37,7 +37,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
     try {
       // 초기화
       await _monitoringService.initialize();
-      
+
       // 모니터링 시작
       await _monitoringService.startMonitoring();
 
@@ -75,7 +75,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
           _hasError = true;
           _errorMessage = e.toString();
         });
-        
+
         _showErrorDialog('모니터링 시작 실패', '카메라 또는 권한 문제가 발생했습니다.\n\n오류: $e');
       }
     }
@@ -376,7 +376,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
         );
 
         await _monitoringService.stopMonitoring();
-        
+
         if (mounted) {
           Navigator.pop(context); // 로딩 닫기
           Navigator.pop(context); // 모니터링 화면 닫기

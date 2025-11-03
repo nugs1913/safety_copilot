@@ -37,7 +37,7 @@ class FaceDetectionService {
     try {
       // CameraImage를 InputImage로 변환
       final inputImage = _convertCameraImage(image);
-      
+
       // 얼굴 감지
       final faces = await _faceDetector.processImage(inputImage);
 
@@ -82,7 +82,7 @@ class FaceDetectionService {
   InputImage _convertCameraImage(CameraImage image) {
     // CameraImage를 InputImage로 변환하는 로직
     // 실제 구현에서는 이미지 회전 및 포맷 변환 필요
-    
+
     final BytesBuilder allBytes = BytesBuilder();
     for (final Plane plane in image.planes) {
       allBytes.add(plane.bytes);
@@ -113,4 +113,3 @@ class FaceDetectionService {
     DetectionAlgorithms.resetCounters();
   }
 }
-
