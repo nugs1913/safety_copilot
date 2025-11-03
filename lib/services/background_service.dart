@@ -5,8 +5,10 @@ import 'package:geolocator/geolocator.dart';
 import 'face_detection_service.dart';
 import 'notification_service.dart';
 import 'database_service.dart';
+import 'gps_driving_service.dart';
 import '../models/detection_event.dart';
 import '../models/driving_session.dart';
+import '../models/driving_behavior_event.dart';
 import '../utils/constants.dart';
 import '../utils/detection_algorithms.dart';
 
@@ -18,11 +20,11 @@ class BackgroundMonitoringService {
   final FaceDetectionService _faceDetectionService = FaceDetectionService();
   final NotificationService _notificationService = NotificationService.instance;
   final DatabaseService _databaseService = DatabaseService.instance;
+  final GpsDrivingService _gpsService = GpsDrivingService.instance;
   final Battery _battery = Battery();
 
   CameraController? _cameraController;
   Timer? _batteryCheckTimer;
-  StreamSubscription<Position>? _gpsSubscription;
 
   int _currentPollingRate = 1;
   int? _currentSessionId;
@@ -34,19 +36,6 @@ class BackgroundMonitoringService {
 
   bool _isDrowsyAlertActive = false;
   bool _isPhoneAlertActive = false;
-
-  // GPS 데이터 추적 변수
-  Position? _previousPosition;
-  DateTime? _previousTimestamp;
-  double _totalDistance = 0.0;
-  double _maxSpeed = 0.0;
-  List<double> _speedHistory = [];
-  int _harshAccelerationCount = 0;
-  int _harshBrakingCount = 0;
-  int _harshTurnCount = 0;
-  bool _isHarshAccelerationAlertActive = false;
-  bool _isHarshBrakingAlertActive = false;
-  bool _isHarshTurnAlertActive = false;
 
   BackgroundMonitoringService._init();
 
@@ -127,7 +116,7 @@ class BackgroundMonitoringService {
     await _adjustPollingRate();
 
     _startImageProcessingStream();
-    _startGpsMonitoring();
+    await _gpsService.startMonitoring();
 
     _batteryCheckTimer?.cancel();
     _batteryCheckTimer = Timer.periodic(
@@ -164,138 +153,6 @@ class BackgroundMonitoringService {
     } catch (e) {
       print('Error starting image stream: $e');
     }
-  }
-
-  void _startGpsMonitoring() {
-    _gpsSubscription?.cancel();
-    _gpsSubscription = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 10,
-      ),
-    ).listen((Position position) {
-      if (!_isMonitoring) return;
-
-      _processGpsData(position);
-    }, onError: (e) {
-      print('GPS Stream Error: $e');
-    });
-  }
-
-  void _processGpsData(Position position) {
-    final currentTime = DateTime.now();
-
-    // 현재 속도 (m/s -> km/h)
-    final currentSpeed = (position.speed * 3.6).clamp(0.0, 300.0);
-
-    // 속도 히스토리에 추가 (평균 속도 계산용)
-    _speedHistory.add(currentSpeed);
-    if (_speedHistory.length > 100) {
-      _speedHistory.removeAt(0); // 최근 100개만 유지
-    }
-
-    // 최고 속도 업데이트
-    if (currentSpeed > _maxSpeed) {
-      _maxSpeed = currentSpeed;
-    }
-
-    // 이전 위치가 있으면 변화량 계산
-    if (_previousPosition != null && _previousTimestamp != null) {
-      final timeDiff = currentTime.difference(_previousTimestamp!).inMilliseconds / 1000.0;
-
-      if (timeDiff > 0 && timeDiff < 10) { // 10초 이내의 유효한 데이터만 처리
-        // 거리 계산 (미터)
-        final distance = Geolocator.distanceBetween(
-          _previousPosition!.latitude,
-          _previousPosition!.longitude,
-          position.latitude,
-          position.longitude,
-        );
-
-        // 총 거리 누적 (km)
-        _totalDistance += distance / 1000.0;
-
-        // 이전 속도
-        final previousSpeed = (_previousPosition!.speed * 3.6).clamp(0.0, 300.0);
-
-        // 가속도 계산 (m/s²)
-        final acceleration = ((currentSpeed - previousSpeed) / 3.6) / timeDiff;
-
-        // 급가속 감지
-        if (acceleration > AppConstants.HARSH_ACCELERATION_THRESHOLD) {
-          if (!_isHarshAccelerationAlertActive) {
-            _isHarshAccelerationAlertActive = true;
-            _harshAccelerationCount++;
-            print("--- HARSH ACCELERATION DETECTED (Total: $_harshAccelerationCount) ---");
-            print("Acceleration: ${acceleration.toStringAsFixed(2)} m/s²");
-            _notificationService.showAlert(
-              DetectionType.phoneUsage, // GPS 이벤트용 임시 타입 사용
-              AlertLevel.warning,
-              '급가속이 감지되었습니다. 안전 운전하세요.',
-            );
-          }
-        } else if (acceleration < AppConstants.HARSH_ACCELERATION_THRESHOLD * 0.5) {
-          _isHarshAccelerationAlertActive = false;
-        }
-
-        // 급제동 감지
-        if (acceleration < -AppConstants.HARSH_BRAKING_THRESHOLD) {
-          if (!_isHarshBrakingAlertActive) {
-            _isHarshBrakingAlertActive = true;
-            _harshBrakingCount++;
-            print("--- HARSH BRAKING DETECTED (Total: $_harshBrakingCount) ---");
-            print("Deceleration: ${acceleration.abs().toStringAsFixed(2)} m/s²");
-            _notificationService.showAlert(
-              DetectionType.phoneUsage, // GPS 이벤트용 임시 타입 사용
-              AlertLevel.danger,
-              '급제동이 감지되었습니다. 안전거리를 유지하세요.',
-            );
-          }
-        } else if (acceleration > -AppConstants.HARSH_BRAKING_THRESHOLD * 0.5) {
-          _isHarshBrakingAlertActive = false;
-        }
-
-        // 방향 변화 계산 (급회전 감지)
-        final bearing = Geolocator.bearingBetween(
-          _previousPosition!.latitude,
-          _previousPosition!.longitude,
-          position.latitude,
-          position.longitude,
-        );
-        final previousBearing = _previousPosition!.heading;
-
-        if (previousBearing >= 0 && distance > 5) { // 5미터 이상 이동했을 때만
-          var bearingDiff = (bearing - previousBearing).abs();
-          if (bearingDiff > 180) {
-            bearingDiff = 360 - bearingDiff;
-          }
-
-          // 각도 변화율 (degrees/second)
-          final turnRate = bearingDiff / timeDiff;
-
-          // 급회전 감지
-          if (turnRate > AppConstants.HARSH_TURN_THRESHOLD && currentSpeed > 10) {
-            if (!_isHarshTurnAlertActive) {
-              _isHarshTurnAlertActive = true;
-              _harshTurnCount++;
-              print("--- HARSH TURN DETECTED (Total: $_harshTurnCount) ---");
-              print("Turn rate: ${turnRate.toStringAsFixed(2)} degrees/s");
-              _notificationService.showAlert(
-                DetectionType.phoneUsage, // GPS 이벤트용 임시 타입 사용
-                AlertLevel.warning,
-                '급회전이 감지되었습니다. 속도를 줄이세요.',
-              );
-            }
-          } else if (turnRate < AppConstants.HARSH_TURN_THRESHOLD * 0.5) {
-            _isHarshTurnAlertActive = false;
-          }
-        }
-      }
-    }
-
-    // 현재 위치와 시간을 이전 값으로 저장
-    _previousPosition = position;
-    _previousTimestamp = currentTime;
   }
 
   // --- (졸음 감지 로직 _handleDetectionResult는 원본과 동일) ---
@@ -403,42 +260,58 @@ class BackgroundMonitoringService {
     _isMonitoring = false;
     _batteryCheckTimer?.cancel();
     _cameraController?.stopImageStream();
-    _gpsSubscription?.cancel();
-    _gpsSubscription = null;
 
-    // [제거] FlutterBackgroundService().invoke("stopService");
+    // GPS 서비스 중지 및 데이터 가져오기
+    final gpsStats = _gpsService.getDrivingStatistics();
+    final behaviorStats = _gpsService.getBehaviorStatistics();
+    final behaviorEvents = _gpsService.getBehaviorEvents();
+    _gpsService.stopMonitoring();
+
+    // GPS 행동 이벤트를 데이터베이스에 저장
+    if (_currentSessionId != null && behaviorEvents.isNotEmpty) {
+      for (var event in behaviorEvents) {
+        final eventWithSessionId = DrivingBehaviorEvent(
+          sessionId: _currentSessionId,
+          type: event.type,
+          timestamp: event.timestamp,
+          latitude: event.latitude,
+          longitude: event.longitude,
+          speed: event.speed,
+          acceleration: event.acceleration,
+          turnRate: event.turnRate,
+          severity: event.severity,
+        );
+        await _databaseService.createBehaviorEvent(eventWithSessionId);
+      }
+    }
 
     if (_currentSessionId != null && _sessionStartTime != null) {
-      // ... (세션 저장 로직은 원본과 동일) ...
       final endTime = DateTime.now();
       final duration = endTime.difference(_sessionStartTime!);
       final durationInMinutes = (duration.inSeconds / 60).ceil();
       final effectiveDurationMinutes =
           durationInMinutes < 1 ? 1 : durationInMinutes;
-      // 평균 속도 계산
-      final averageSpeed = _speedHistory.isNotEmpty
-          ? _speedHistory.reduce((a, b) => a + b) / _speedHistory.length
-          : 0.0;
 
       final score = DetectionAlgorithms.calculateDrivingScore(
         drowsinessEvents: _drowsinessEventCount,
         phoneUsageEvents: _phoneUsageEventCount,
         durationMinutes: effectiveDurationMinutes,
       );
+
       final session = DrivingSession(
         id: _currentSessionId,
         startTime: _sessionStartTime!,
         endTime: endTime,
         drowsinessEvents: _drowsinessEventCount,
         phoneUsageEvents: _phoneUsageEventCount,
-        harshAccelerationEvents: _harshAccelerationCount,
-        harshBrakingEvents: _harshBrakingCount,
-        harshTurnEvents: _harshTurnCount,
+        harshAccelerationEvents: behaviorStats['harshAcceleration'] ?? 0,
+        harshBrakingEvents: behaviorStats['harshBraking'] ?? 0,
+        harshTurnEvents: behaviorStats['harshTurn'] ?? 0,
         score: score,
         durationMinutes: durationInMinutes,
-        totalDistance: _totalDistance > 0 ? _totalDistance : null,
-        maxSpeed: _maxSpeed > 0 ? _maxSpeed : null,
-        averageSpeed: averageSpeed > 0 ? averageSpeed : null,
+        totalDistance: gpsStats['totalDistance']! > 0 ? gpsStats['totalDistance'] : null,
+        maxSpeed: gpsStats['maxSpeed']! > 0 ? gpsStats['maxSpeed'] : null,
+        averageSpeed: gpsStats['averageSpeed']! > 0 ? gpsStats['averageSpeed'] : null,
       );
       await _databaseService.updateSession(session);
     }
@@ -446,23 +319,10 @@ class BackgroundMonitoringService {
     // 카운터 및 플래그 리셋
     _drowsinessEventCount = 0;
     _phoneUsageEventCount = 0;
-    _harshAccelerationCount = 0;
-    _harshBrakingCount = 0;
-    _harshTurnCount = 0;
     _currentSessionId = null;
     _sessionStartTime = null;
     _isDrowsyAlertActive = false;
     _isPhoneAlertActive = false;
-    _isHarshAccelerationAlertActive = false;
-    _isHarshBrakingAlertActive = false;
-    _isHarshTurnAlertActive = false;
-
-    // GPS 데이터 리셋
-    _previousPosition = null;
-    _previousTimestamp = null;
-    _totalDistance = 0.0;
-    _maxSpeed = 0.0;
-    _speedHistory.clear();
 
     // 서비스 종료 시 리소스 즉시 해제
     dispose();
@@ -473,7 +333,7 @@ class BackgroundMonitoringService {
   void dispose() {
     _batteryCheckTimer?.cancel();
     _cameraController?.dispose();
-    _gpsSubscription?.cancel();
+    _gpsService.dispose();
     _faceDetectionService.dispose();
     _notificationService.dispose();
     print("All services disposed.");
