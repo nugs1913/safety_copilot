@@ -26,6 +26,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   double _currentSpeed = 0.0;
   String _alertStatus = '정상';
   Color _alertColor = Colors.green;
+  String _initializationStatus = '초기화 준비 중...';
 
   @override
   void initState() {
@@ -35,10 +36,27 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
 
   Future<void> _startMonitoring() async {
     try {
-      // 초기화
+      // 1단계: 알림 서비스 초기화
+      if (mounted) {
+        setState(() => _initializationStatus = '알림 서비스 초기화 중...');
+      }
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      // 2단계: 카메라 초기화
+      if (mounted) {
+        setState(() => _initializationStatus = '카메라 초기화 중...');
+      }
       await _monitoringService.initialize();
 
-      // 모니터링 시작
+      // UI 업데이트를 위한 짧은 대기
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      if (!mounted) return;
+
+      // 3단계: 모니터링 시작
+      if (mounted) {
+        setState(() => _initializationStatus = '모니터링 시작 중...');
+      }
       await _monitoringService.startMonitoring();
 
       if (mounted) {
@@ -57,9 +75,9 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
         }
       });
 
-      // 통계 업데이트 타이머
+      // 통계 업데이트 타이머 (GPS 서비스가 시작될 때까지 대기)
       _statsUpdateTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
-        if (mounted && _gpsService.isMonitoring) {
+        if (mounted) {
           final speed = _gpsService.getCurrentSpeed();
           if (speed != null) {
             setState(() {
@@ -155,15 +173,15 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
       backgroundColor: Colors.black,
       body: SafeArea(
         child: !_isInitialized
-            ? const Center(
+            ? Center(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    CircularProgressIndicator(color: Colors.white),
-                    SizedBox(height: 20),
+                    const CircularProgressIndicator(color: Colors.white),
+                    const SizedBox(height: 20),
                     Text(
-                      '모니터링 준비 중...',
-                      style: TextStyle(color: Colors.white, fontSize: 16),
+                      _initializationStatus,
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
                     ),
                   ],
                 ),

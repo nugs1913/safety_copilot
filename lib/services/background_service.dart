@@ -42,14 +42,21 @@ class BackgroundMonitoringService {
   CameraController? get cameraController => _cameraController;
 
   Future<void> initialize() async {
-    // 알림 서비스 초기화 (main.dart에서도 호출하지만, Isolate에서 한 번 더 보장)
-    await _notificationService.initialize();
+    try {
+      // 알림 서비스 초기화 (가벼운 작업)
+      await _notificationService.initialize();
 
-    // GPS 권한 및 서비스 활성화 확인 (권한은 main에서 이미 요청했어야 함)
-    await _initializeGps();
+      // GPS 권한 확인 (가벼운 작업, 실제 GPS 시작은 나중에)
+      await _initializeGps();
 
-    // 카메라 초기화
-    await _initializeCamera();
+      // 카메라 초기화 (무거운 작업)
+      await _initializeCamera();
+
+      print('Background service initialized');
+    } catch (e) {
+      print('Background service initialization error: $e');
+      rethrow;
+    }
   }
 
   Future<void> _initializeGps() async {
@@ -82,7 +89,7 @@ class BackgroundMonitoringService {
 
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.low, // 빠른 초기화를 위해 low 사용
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.nv21,
       );
@@ -116,7 +123,15 @@ class BackgroundMonitoringService {
     await _adjustPollingRate();
 
     _startImageProcessingStream();
-    await _gpsService.startMonitoring();
+
+    // GPS 서비스를 비동기로 시작 (UI 블로킹 방지)
+    _gpsService.startMonitoring().then((success) {
+      if (success) {
+        print('GPS monitoring started successfully');
+      } else {
+        print('GPS monitoring failed to start');
+      }
+    });
 
     _batteryCheckTimer?.cancel();
     _batteryCheckTimer = Timer.periodic(
