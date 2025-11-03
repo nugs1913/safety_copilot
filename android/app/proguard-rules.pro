@@ -19,6 +19,18 @@
 # Audioplayers
 -keep class xyz.luan.audioplayers.** { *; }
 
+# TensorFlow Lite
+-keep class org.tensorflow.lite.** { *; }
+-keep class org.tensorflow.lite.gpu.** { *; }
+-keep class org.tensorflow.lite.gpu.GpuDelegate** { *; }
+-keep class org.tensorflow.lite.gpu.GpuDelegateFactory** { *; }
+-keepclassmembers class org.tensorflow.lite.gpu.GpuDelegate** {
+    *;
+}
+-keepclassmembers class org.tensorflow.lite.gpu.GpuDelegateFactory** {
+    *;
+}
+
 # Preserve line number information for debugging
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
