@@ -72,8 +72,11 @@ class _PermissionScreenState extends State<PermissionScreen> {
     // 필요한 권한 확인
     final cameraStatus = await Permission.camera.status;
     final notificationStatus = await Permission.notification.status;
+    final locationStatus = await Permission.location.status;
 
-    if (cameraStatus.isGranted && notificationStatus.isGranted) {
+    if (cameraStatus.isGranted &&
+        notificationStatus.isGranted &&
+        locationStatus.isGranted) {
       setState(() {
         _allPermissionsGranted = true;
         _isChecking = false;
@@ -90,6 +93,7 @@ class _PermissionScreenState extends State<PermissionScreen> {
     final Map<Permission, PermissionStatus> statuses = await [
       Permission.camera,
       Permission.notification,
+      Permission.location,
     ].request();
 
     final allGranted = statuses.values.every((status) => status.isGranted);
